@@ -244,6 +244,88 @@ def dicho(alignment, val, i=0, j=None):
         return dicho(alignment, val, i, k)
 
 
+# Cache for pre-computed codes to avoid repeated disk reads
+_CODES_CACHE: dict[str, torch.Tensor] = {}
+
+
+def load_precomputed_codes(codes_path: str) -> torch.Tensor:
+    """Load pre-computed codes from disk with caching."""
+    if codes_path not in _CODES_CACHE:
+        data = torch.load(codes_path, map_location="cpu", weights_only=True)
+        _CODES_CACHE[codes_path] = data["codes"]
+    return _CODES_CACHE[codes_path]
+
+
+class PrecomputedTokenizer:
+    """Tokenizer that loads pre-computed Mimi codes instead of encoding on the fly.
+
+    This provides a massive speedup during training by eliminating the Mimi
+    encoding bottleneck. Use precompute_codes.py to generate the codes first.
+    """
+
+    def __init__(self, interleaver: Interleaver, duration_sec: float, frame_rate: float):
+        self.interleaver = interleaver
+        self.duration_sec = duration_sec
+        self.frame_rate = frame_rate
+        self.num_audio_frames = math.ceil(duration_sec * frame_rate)
+
+    def __call__(self, codes_path: str, start_sec: float, original_path: str) -> Sample:
+        """Load pre-computed codes and create a sample.
+
+        Args:
+            codes_path: Path to the pre-computed .pt file
+            start_sec: Start time in seconds for this chunk
+            original_path: Original audio path (for loading alignment JSON)
+        """
+        # Load pre-computed codes
+        full_codes = load_precomputed_codes(codes_path)  # [n_q, T_full]
+
+        # Calculate frame indices for this chunk
+        start_frame = int(start_sec * self.frame_rate)
+        end_frame = start_frame + self.num_audio_frames
+
+        # Slice codes for this chunk
+        audio_tokens = full_codes[:, start_frame:end_frame]  # [n_q, T_chunk]
+        this_num_audio_frames = audio_tokens.shape[-1]
+
+        # Pad if necessary
+        if this_num_audio_frames < self.num_audio_frames:
+            audio_tokens = torch.nn.functional.pad(
+                audio_tokens,
+                (0, self.num_audio_frames - this_num_audio_frames),
+                value=self.interleaver.zero_padding,
+            )
+
+        # Move to GPU and reshape
+        audio_tokens = audio_tokens.cuda()
+        audio_tokens = audio_tokens.view(1, -1, self.num_audio_frames)  # [1, n_q, T]
+
+        # Load alignments from JSON
+        info_file = os.path.splitext(original_path)[0] + ".json"
+        with open(info_file) as f:
+            data = json.load(f)
+            alignments = data["alignments"]
+
+        # Extract alignments for this chunk
+        start_alignment = dicho(alignments, start_sec)
+        end_alignment = dicho(alignments, start_sec + self.duration_sec)
+        alignments = [
+            (a[0], (a[1][0] - start_sec, a[1][1] - start_sec), a[2])
+            for a in alignments[start_alignment:end_alignment]
+        ]
+
+        # Build text tokens
+        text_tokens = self.interleaver.prepare_item(alignments, this_num_audio_frames)
+        text_tokens = torch.nn.functional.pad(
+            text_tokens,
+            (0, self.num_audio_frames - text_tokens.shape[-1]),
+            value=self.interleaver.zero_padding,
+        )
+
+        codes = torch.cat([text_tokens, audio_tokens], dim=1)
+        return Sample(codes, data.get("text_conditions", None))
+
+
 class InterleavedTokenizer:
     def __init__(self, mimi, interleaver, duration_sec: float):
         self.mimi = mimi

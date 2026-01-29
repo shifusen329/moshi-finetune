@@ -1,0 +1,51 @@
+# data
+data:
+  eval_data: '/workspace/moshi-finetune/manifest_eval.jsonl'
+  shuffle: true
+  train_data: '/workspace/moshi-finetune/manifest_train.jsonl'
+
+# model
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+
+full_finetuning: false # Activate lora.enable if partial finetuning
+lora:
+  enable: true # Set to False if full_finetuning is True
+  rank: 128
+  scaling: 2.
+  ft_embed: false # Optional, set to True if you want to finetune the embedding layer
+
+first_codebook_weight_multiplier: 100.
+text_padding_weight: .5
+
+# optim - 2x B200 GPUs, batch 128/GPU = 256 effective
+# Run: torchrun --nproc-per-node 2 -m train example/moshi_7B-B200-batch256.yaml
+duration_sec: 100
+batch_size: 128
+max_steps: 1500
+gradient_checkpointing: true
+optim:
+  lr: 4.0e-6
+  weight_decay: 0.1
+  pct_start: 0.08
+
+# other
+seed: 0
+log_freq: 1
+eval_freq: 75
+do_eval: true
+do_ckpt: true
+ckpt_freq: 150
+num_ckpt_keep: 4
+
+save_adapters: true # Must be False if full_finetuning is True
+
+overwrite_run_dir: true
+run_dir: "/workspace/moshi-finetune/runs/ririka_v2_batch256"
+
+# wandb
+wandb:
+  project: "ririka-moshi"
+  run_name: "ririka_v2_batch256"
+  key: "04c8681fe30d07ab8440db48093171fe2365d3ef"
+  offline: False

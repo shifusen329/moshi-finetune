@@ -16,7 +16,7 @@ from torch.optim import AdamW, lr_scheduler
 from finetune.args import TrainArgs
 from finetune.checkpointing import Checkpointer
 from finetune.data.data_loader import build_data_loader
-from finetune.data.interleaver import InterleavedTokenizer, Interleaver
+from finetune.data.interleaver import InterleavedTokenizer, Interleaver, PrecomputedTokenizer
 from finetune.distributed import (
     BACKEND,
     avg_aggregate,
@@ -52,6 +52,17 @@ def main_logger_info(message: str) -> None:
         logger.info(message)
 
 
+def is_precomputed_manifest(manifest_path: str) -> bool:
+    """Check if a manifest uses pre-computed codes."""
+    import json
+    with open(manifest_path) as f:
+        first_line = f.readline()
+        if first_line.strip():
+            entry = json.loads(first_line)
+            return "codes_path" in entry
+    return False
+
+
 def train(config: str):
     args: TrainArgs = TrainArgs.load(config, drop_extra_fields=False)
     set_logger(logging.INFO)
@@ -65,6 +76,10 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
     # 1. Initial setup and checks
     set_random_seed(args.seed)
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    # Disable torch.compile/dynamo to avoid stride mismatch bugs with FSDP on Blackwell
+    import torch._dynamo
+    torch._dynamo.config.disable = True
 
     # Init NCCL
     if "LOCAL_RANK" in os.environ:
@@ -142,10 +157,19 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
     lm_config["lora_rank"] = args.lora.rank
     lm_config["lora_scaling"] = args.lora.scaling
 
-    mimi = checkpoint_info.get_mimi(device="cuda")
-    mimi.eval()
-    for p in mimi.parameters():
-        p.requires_grad = False
+    # Check if using pre-computed codes
+    use_precomputed = is_precomputed_manifest(args.data.train_data)
+    if use_precomputed:
+        main_logger_info("Detected pre-computed codes manifest - skipping Mimi encoder loading")
+        mimi = None
+        # Mimi frame rate is 12.5 Hz (24000 sample_rate / 1920 hop_length)
+        frame_rate = 12.5
+    else:
+        mimi = checkpoint_info.get_mimi(device="cuda")
+        mimi.eval()
+        for p in mimi.parameters():
+            p.requires_grad = False
+        frame_rate = mimi.frame_rate
 
     # 4.2 Load and shard model, prepare interleaver for audio/text tokens.
     model = get_fsdp_model(args, checkpoint_info)
@@ -154,19 +178,26 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
 
     interleaver = Interleaver(
         spm,
-        mimi.frame_rate,
+        frame_rate,
         model.text_padding_token_id,
         model.end_of_text_padding_id,
         model.zero_token_id,
         keep_main_only=True,
     )
-    interleaved_tokenizer = InterleavedTokenizer(
-        mimi, interleaver, duration_sec=args.duration_sec
-    )
+
+    if use_precomputed:
+        main_logger_info("Using PrecomputedTokenizer for fast data loading")
+        instruct_tokenizer = PrecomputedTokenizer(
+            interleaver, duration_sec=args.duration_sec, frame_rate=frame_rate
+        )
+    else:
+        instruct_tokenizer = InterleavedTokenizer(
+            mimi, interleaver, duration_sec=args.duration_sec
+        )
 
     # 5. Load data loaders
     data_loader = build_data_loader(
-        instruct_tokenizer=interleaved_tokenizer,
+        instruct_tokenizer=instruct_tokenizer,
         args=args.data,
         batch_size=args.batch_size,
         seed=args.seed,
@@ -177,7 +208,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
 
     if args.do_eval:
         eval_data_loader = build_data_loader(
-            instruct_tokenizer=interleaved_tokenizer,
+            instruct_tokenizer=instruct_tokenizer,
             args=args.data,
             batch_size=args.batch_size,
             seed=None,
