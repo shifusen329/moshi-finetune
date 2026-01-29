@@ -1,12 +1,12 @@
-from typing import Any, Iterator
+from typing import Any, Iterator, Union
 
 from .args import DataArgs
 from .dataset import build_dataset
-from .interleaver import Batch
+from .interleaver import Batch, InterleavedTokenizer, PrecomputedTokenizer
 
 
 def build_data_loader(
-    instruct_tokenizer: Any,
+    instruct_tokenizer: Union[InterleavedTokenizer, PrecomputedTokenizer],
     args: DataArgs,
     batch_size: int,
     seed: int | None,

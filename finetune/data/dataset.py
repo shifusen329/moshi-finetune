@@ -3,7 +3,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Union
 
 import numpy as np
 import sphn
@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from finetune.distributed import get_rank
 
-from .interleaver import InterleavedTokenizer, Sample
+from .interleaver import InterleavedTokenizer, PrecomputedTokenizer, Sample
 
 logger = logging.getLogger("dataset")
 
@@ -189,6 +189,36 @@ def get_rng(seed: int, rank: int) -> np.random.RandomState:
 
 def get_dataset_iterator(
     source: DataDir | DataFile,
+    instruct_tokenizer: Union[InterleavedTokenizer, PrecomputedTokenizer],
+    rank: int,
+    world_size: int,
+    is_finite: bool,
+    seed: int | None,
+    shuffle_at_epoch: bool,
+) -> Iterator[Sample]:
+    """Get dataset iterator, automatically detecting pre-computed vs live encoding."""
+    # Check if this is a pre-computed manifest
+    is_precomputed = False
+    for jsonl_file in source.jsonl_files:
+        with open(jsonl_file) as f:
+            first_line = f.readline()
+            if first_line.strip():
+                entry = json.loads(first_line)
+                is_precomputed = "codes_path" in entry
+        break
+
+    if is_precomputed:
+        yield from get_precomputed_iterator(
+            source, instruct_tokenizer, rank, world_size, is_finite, seed, shuffle_at_epoch
+        )
+    else:
+        yield from get_live_encoding_iterator(
+            source, instruct_tokenizer, rank, world_size, is_finite, seed, shuffle_at_epoch
+        )
+
+
+def get_live_encoding_iterator(
+    source: DataDir | DataFile,
     instruct_tokenizer: InterleavedTokenizer,
     rank: int,
     world_size: int,
@@ -196,6 +226,7 @@ def get_dataset_iterator(
     seed: int | None,
     shuffle_at_epoch: bool,
 ) -> Iterator[Sample]:
+    """Original iterator that encodes audio on-the-fly with Mimi."""
     epoch = 1
     while True:
         for jsonl_file in source.jsonl_files:
@@ -216,6 +247,58 @@ def get_dataset_iterator(
             for sample in dataset:
                 wav = sample["data"][..., : sample["unpadded_len"]]
                 yield instruct_tokenizer(wav, sample["start_time_sec"], sample["path"])
+        if is_finite:
+            break
+        print(f"Rank {rank} finished epoch {epoch}")
+        epoch += 1
+
+
+def get_precomputed_iterator(
+    source: DataDir | DataFile,
+    tokenizer: PrecomputedTokenizer,
+    rank: int,
+    world_size: int,
+    is_finite: bool,
+    seed: int | None,
+    shuffle_at_epoch: bool,
+) -> Iterator[Sample]:
+    """Fast iterator that loads pre-computed Mimi codes from disk."""
+    epoch = 1
+    rng = np.random.RandomState(seed=np.array((seed or 0, rank)))
+
+    while True:
+        for jsonl_file in source.jsonl_files:
+            # Load all entries and chunk them
+            chunks = []
+            with open(jsonl_file) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    # Create chunks based on duration
+                    start_sec = 0.0
+                    while start_sec < entry["duration"]:
+                        chunks.append({
+                            "codes_path": entry["codes_path"],
+                            "original_path": entry["path"],
+                            "start_sec": start_sec,
+                        })
+                        start_sec += tokenizer.duration_sec
+
+            # Shuffle if needed
+            if shuffle_at_epoch:
+                rng.shuffle(chunks)
+
+            # Distribute across ranks
+            for idx, chunk in enumerate(chunks):
+                if idx % world_size != rank:
+                    continue
+                yield tokenizer(
+                    chunk["codes_path"],
+                    chunk["start_sec"],
+                    chunk["original_path"],
+                )
+
         if is_finite:
             break
         print(f"Rank {rank} finished epoch {epoch}")

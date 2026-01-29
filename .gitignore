@@ -106,3 +106,10 @@ cython_debug/
 example/debug_configs/
 
 
+
+# Training data and artifacts
+/data/
+runs/
+manifest_*.jsonl
+debug.log
+data_encoded/
