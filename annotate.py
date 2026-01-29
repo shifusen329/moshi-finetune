@@ -4,9 +4,11 @@ import gzip
 import importlib
 import json
 import logging
+import multiprocessing as mp
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,18 +143,30 @@ def process_one(
             [chunk["text"], chunk["timestamp"], "SPEAKER_MAIN"] for chunk in chunks
         ]
     }
+
+    # PersonaPlex: add text_prompt and voice_prompt fields
+    if params.personaplex:
+        if params.text_prompt:
+            # Wrap with <system> tags if not already present
+            text = params.text_prompt.strip()
+            if not (text.startswith("<system>") and text.endswith("<system>")):
+                text = f"<system> {text} <system>"
+            outputs["text_prompt"] = text
+        if params.voice_prompt:
+            outputs["voice_prompt"] = params.voice_prompt
+
     logger.debug("Whisper applied.")
     with write_and_rename(out_file, "w", pid=True) as f:
         json.dump(outputs, f, ensure_ascii=False)
     logger.debug("Wrote file %s", out_file)
 
 
-def run(params: "Params", shard: int = 0):
+def run(params: "Params", shard: int = 0, worker_id: int = 0, num_workers: int = 1):
     init_logging(params.verbose)
     # local_rank = dora.distrib.get_distrib_spec().local_rank
     # shard += local_rank
     local_rank = 0
-    logger.info("Hello, world, this is shard %d / %d.", shard, params.shards)
+    logger.info("Hello, world, this is shard %d / %d, worker %d / %d.", shard, params.shards, worker_id, num_workers)
     params.shard = shard
     torch.cuda.set_device(local_rank)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
@@ -165,12 +179,16 @@ def run(params: "Params", shard: int = 0):
     logger.info("Loading egs %s.", params.egs)
     paths = load_audio_paths(params.egs)
     kept_paths = paths[shard :: params.shards]
+    # Further split by worker_id for multi-worker local processing
+    if num_workers > 1:
+        kept_paths = kept_paths[worker_id::num_workers]
     logger.info("Processing % 8d files out of % 8d.", len(kept_paths), len(paths))
     del paths
 
+    processed = 0
     for idx, path in enumerate(kept_paths):
         if (idx + 1) % 100 == 0:
-            logger.info("Processing % 8d / % 8d files.", idx + 1, len(kept_paths))
+            logger.info("Worker %d: Processing % 8d / % 8d files.", worker_id, idx + 1, len(kept_paths))
         out_file = path.with_suffix(".json")
         err_file = path.with_suffix(".json.err")
         if out_file.exists():
@@ -190,12 +208,20 @@ def run(params: "Params", shard: int = 0):
                 w_model=w_model,
                 params=params,
             )
+            processed += 1
         except Exception as err:
             if "cuda" in repr(err).lower():
                 raise
             logger.exception("Error processing %s", path)
             err_file.touch()
             continue
+    return processed
+
+
+def run_worker(args_tuple):
+    """Wrapper for multiprocessing - unpacks arguments and calls run()."""
+    params, shard, worker_id, num_workers = args_tuple
+    return run(params, shard=shard, worker_id=worker_id, num_workers=num_workers)
 
 
 @dataclass
@@ -208,6 +234,10 @@ class Params:
     rerun_errors: bool
     shards: int
     shard: int = 0
+    # PersonaPlex options
+    personaplex: bool = False
+    text_prompt: str | None = None
+    voice_prompt: str | None = None
 
 
 def main():
@@ -243,7 +273,25 @@ def main():
     parser.add_argument(
         "-l", "--local", action="store_true", help="Run locally to debug."
     )
+    parser.add_argument(
+        "-w", "--num-workers", type=int, default=1,
+        help="Number of parallel worker processes for local execution."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
+
+    # PersonaPlex options
+    parser.add_argument(
+        "--personaplex", action="store_true",
+        help="Enable PersonaPlex mode: adds text_prompt and voice_prompt to output JSON."
+    )
+    parser.add_argument(
+        "--text-prompt", type=str, default=None,
+        help="Text prompt for PersonaPlex (will be wrapped with <system> tags)."
+    )
+    parser.add_argument(
+        "--voice-prompt", type=str, default=None,
+        help="Voice prompt filename for PersonaPlex (e.g., 'NATF2.pt')."
+    )
 
     args = parser.parse_args()
 
@@ -256,11 +304,29 @@ def main():
     kwargs.pop("local")
     kwargs.pop("partition")
     kwargs.pop("log_folder")
+    num_workers = kwargs.pop("num_workers")
     params = Params(**kwargs)
 
     if args.local:
         params.shards = 1
-        run(params)
+        if num_workers > 1:
+            logger.info("Running locally with %d workers.", num_workers)
+            mp.set_start_method("spawn", force=True)
+            worker_args = [(params, 0, worker_id, num_workers) for worker_id in range(num_workers)]
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                futures = {executor.submit(run_worker, args): args[2] for args in worker_args}
+                total_processed = 0
+                for future in as_completed(futures):
+                    worker_id = futures[future]
+                    try:
+                        processed = future.result()
+                        total_processed += processed
+                        logger.info("Worker %d completed, processed %d files.", worker_id, processed)
+                    except Exception as e:
+                        logger.exception("Worker %d failed with error: %s", worker_id, e)
+                logger.info("All workers completed. Total files processed: %d", total_processed)
+        else:
+            run(params)
     else:
         executor = submitit.SlurmExecutor(folder=args.log_folder)
         executor.update_parameters(

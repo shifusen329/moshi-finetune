@@ -2,7 +2,7 @@
 data:
   eval_data: '' # Optional Fill
   shuffle: true
-  train_data: '' # Fill
+  train_data: '/home/administrator/workspace/moshi-finetune/manifest.jsonl' # Fill
 
 # model
 moshi_paths: 
@@ -20,8 +20,8 @@ text_padding_weight: .5
 
 # optim
 duration_sec: 100
-batch_size: 16
-max_steps: 2000
+batch_size: 32
+max_steps: 5000
 gradient_checkpointing: true
 optim:
   lr: 2e-6
@@ -35,15 +35,16 @@ eval_freq: 100
 do_eval: false
 do_ckpt: true
 ckpt_freq: 100
-
+num_ckpt_keep: 4
 
 save_adapters: true # Must be False if full_finetuning is True
 
-run_dir: ""  # Fill
+overwrite_run_dir: true
+run_dir: "/home/administrator/workspace/moshi-finetune/runs/ririka_v1"  # Fill
 
 # This part is optional and can be kept commented out
-# wandb:
-#   project: "" # your wandb project name
-#   run_name: "" # your wandb run name
-#   key: "" # your wandb api key
-#   offline: False
+wandb:
+  project: "ririka-moshi" # your wandb project name
+  run_name: "" # your wandb run name
+  key: "04c8681fe30d07ab8440db48093171fe2365d3ef" # your wandb api key
+  offline: False
