@@ -206,17 +206,6 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         is_eval=False,
     )
 
-    if args.do_eval:
-        eval_data_loader = build_data_loader(
-            instruct_tokenizer=instruct_tokenizer,
-            args=args.data,
-            batch_size=args.batch_size,
-            seed=None,
-            rank=get_rank(),  # DDP rank
-            world_size=get_world_size(),  # DDP world_size
-            is_eval=True,
-        )
-
     # 6. Load model
     # Define mixed precision
     param_dtype = getattr(torch, args.param_dtype)
@@ -346,6 +335,16 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         if args.do_eval and (
             (args.eval_freq > 0 and state.step % args.eval_freq == 0) or is_last_step
         ):
+            # Recreate eval iterator each time to avoid exhaustion
+            eval_data_loader = build_data_loader(
+                instruct_tokenizer=instruct_tokenizer,
+                args=args.data,
+                batch_size=args.batch_size,
+                seed=None,
+                rank=get_rank(),
+                world_size=get_world_size(),
+                is_eval=True,
+            )
             # write perplexity to state
             evaluate(model, eval_data_loader, state, args)
 
