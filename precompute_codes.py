@@ -27,7 +27,6 @@ from queue import Queue
 from threading import Thread
 
 import numpy as np
-import soundfile as sf
 import torch
 from tqdm import tqdm
 
@@ -38,9 +37,17 @@ logger = logging.getLogger(__name__)
 
 
 def load_audio(path: str, sample_rate: int) -> np.ndarray:
-    """Load audio file and resample if necessary."""
+    """Load audio file and resample if necessary. Returns [channels, samples]."""
     import sphn
-    wav = sphn.read(path, sample_rate=sample_rate)
+    result = sphn.read(path, sample_rate=sample_rate)
+    # sphn.read may return tuple (wav, sample_rate) or just wav
+    if isinstance(result, tuple):
+        wav = result[0]
+    else:
+        wav = result
+    # Ensure [channels, samples] shape
+    if wav.ndim == 1:
+        wav = wav[np.newaxis, :]
     return wav
 
 
@@ -166,18 +173,31 @@ def main():
             try:
                 with torch.no_grad():
                     audio_tensor = torch.from_numpy(audio).float().to(args.device)
-                    if audio_tensor.dim() == 1:
-                        audio_tensor = audio_tensor.unsqueeze(0)
-                    codes = mimi.encode(audio_tensor.unsqueeze(0))  # [1, n_q, T]
-                    codes = codes.squeeze(0).cpu()  # [n_q, T]
+                    # audio_tensor is [channels, samples]
+                    # Stereo: left=moshi, right=user
+                    if audio_tensor.shape[0] >= 2:
+                        moshi_audio = audio_tensor[0:1, :]  # [1, samples]
+                        user_audio = audio_tensor[1:2, :]   # [1, samples]
+                    else:
+                        # Mono: use same audio for both
+                        moshi_audio = audio_tensor
+                        user_audio = audio_tensor
+
+                    # Encode each channel separately
+                    moshi_codes = mimi.encode(moshi_audio.unsqueeze(0))  # [1, n_q, T]
+                    moshi_codes = moshi_codes.squeeze(0).cpu()  # [n_q, T]
+
+                    user_codes = mimi.encode(user_audio.unsqueeze(0))  # [1, n_q, T]
+                    user_codes = user_codes.squeeze(0).cpu()  # [n_q, T]
 
                 # Save codes
                 output_filename = original_path.stem + "_codes.pt"
                 output_path = args.output_dir / output_filename
 
-                # Save codes and metadata
+                # Save codes and metadata (moshi=left channel, user=right channel)
                 torch.save({
-                    "codes": codes,
+                    "moshi_codes": moshi_codes,
+                    "user_codes": user_codes,
                     "sample_rate": sample_rate,
                     "frame_rate": frame_rate,
                     "duration": entry["duration"],

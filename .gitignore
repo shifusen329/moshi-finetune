@@ -112,3 +112,4 @@ example/debug_configs/
 runs/
 manifest_*.jsonl
 debug.log
+data_encoded/

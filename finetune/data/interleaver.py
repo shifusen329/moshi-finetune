@@ -249,10 +249,21 @@ _CODES_CACHE: dict[str, torch.Tensor] = {}
 
 
 def load_precomputed_codes(codes_path: str) -> torch.Tensor:
-    """Load pre-computed codes from disk with caching."""
+    """Load pre-computed codes from disk with caching.
+
+    Returns codes as [2*n_q, T] for stereo: first n_q rows are moshi (left),
+    next n_q rows are user (right).
+    """
     if codes_path not in _CODES_CACHE:
         data = torch.load(codes_path, map_location="cpu", weights_only=True)
-        _CODES_CACHE[codes_path] = data["codes"]
+        # Handle both old format (single "codes") and new format (moshi_codes + user_codes)
+        if "moshi_codes" in data:
+            # New stereo format: concatenate along n_q dimension
+            codes = torch.cat([data["moshi_codes"], data["user_codes"]], dim=0)
+        else:
+            # Old format: single codes tensor
+            codes = data["codes"]
+        _CODES_CACHE[codes_path] = codes
     return _CODES_CACHE[codes_path]
 
 

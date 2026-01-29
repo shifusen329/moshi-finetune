@@ -1,8 +1,8 @@
 # data
 data:
-  eval_data: '/workspace/moshi-finetune/manifest_eval.jsonl'
+  eval_data: '/workspace/moshi-finetune/data_encoded/manifest_eval_precomputed.jsonl'
   shuffle: true
-  train_data: '/workspace/moshi-finetune/manifest_train.jsonl'
+  train_data: '/workspace/moshi-finetune/data_encoded/manifest_train_precomputed.jsonl'
 
 # model
 moshi_paths:
