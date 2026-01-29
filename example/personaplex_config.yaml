@@ -1,0 +1,78 @@
+# PersonaPlex Training Configuration
+#
+# This config trains a PersonaPlex model with dep_q=16 (doubled depth codebooks).
+# Can start from either:
+#   - Moshiko weights (will be expanded 8->16 codebooks)
+#   - PersonaPlex weights (already 16 codebooks)
+#
+# Usage:
+#   torchrun --nproc_per_node=1 train_personaplex.py example/personaplex_config.yaml
+
+run_dir: ./runs/personaplex_finetune
+overwrite_run_dir: true
+
+# Model paths - use Moshiko base (weights will be expanded to dep_q=16)
+# Or use nvidia/personaplex-7b-v1 for pretrained PersonaPlex
+moshi_paths:
+  hf_repo_id: kyutai/moshiko-pytorch-bf16
+  # Uncomment to start from PersonaPlex instead:
+  # hf_repo_id: nvidia/personaplex-7b-v1
+  mimi_path: null
+  moshi_path: null
+  tokenizer_path: null
+  config_path: null
+
+# Data configuration
+data:
+  pretrain_data: ./data/train.jsonl
+  eval_data: ./data/eval.jsonl
+
+# Training hyperparameters
+duration_sec: 10.0
+batch_size: 1
+num_microbatches: 4  # Effective batch = batch_size * num_microbatches
+max_steps: 1000
+max_norm: 1.0
+
+# Loss weights
+first_codebook_weight_multiplier: 1.0
+text_padding_weight: 0.5
+
+# Optimizer
+optim:
+  lr: 1.0e-4
+  weight_decay: 0.1
+  pct_start: 0.05
+
+# LoRA configuration (recommended for PersonaPlex finetuning)
+lora:
+  enable: true
+  rank: 64
+  scaling: 2.0
+  ft_embed: false
+
+full_finetuning: false
+
+# Mixed precision
+param_dtype: bfloat16
+gradient_checkpointing: true
+
+# Logging
+log_freq: 10
+wandb:
+  project: null  # Set to enable wandb logging
+  offline: false
+  key: null
+  run_name: null
+
+# Checkpointing
+do_ckpt: true
+ckpt_freq: 100
+save_adapters: true
+num_ckpt_keep: 3
+
+# Evaluation
+do_eval: true
+eval_freq: 100
+
+seed: 42

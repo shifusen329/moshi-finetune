@@ -139,6 +139,37 @@ python annotate.py {your jsonl file}
 This script can also be run in a distributed manner with SLURM using e.g.
 `--shards 64 --partition 'your-partition'`.
 
+## ⚡ Pre-compute Mimi Codes (Optional)
+
+For faster training, you can pre-encode all audio files with Mimi before training. This eliminates the encoding bottleneck during training and can significantly improve throughput.
+
+```sh
+python precompute_codes.py manifest_train.jsonl --output-dir data_encoded/
+```
+
+You can also process multiple manifests at once:
+
+```sh
+python precompute_codes.py manifest_train.jsonl manifest_eval.jsonl --output-dir data_encoded/
+```
+
+#### Options:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--hf-repo` | `kyutai/moshiko-pytorch-bf16` | HuggingFace repo for Mimi model |
+| `--num-load-threads` | `4` | Number of threads for loading audio |
+| `--device` | `cuda` | Device for encoding |
+
+The script generates new manifest files (e.g., `manifest_train_precomputed.jsonl`) with a `codes_path` field pointing to the pre-computed `.pt` files. Update your training config to use these new manifests:
+
+```yaml
+data:
+  train_data: data_encoded/manifest_train_precomputed.jsonl
+  eval_data: data_encoded/manifest_eval_precomputed.jsonl
+```
+
+Training automatically detects pre-computed manifests and skips loading the Mimi encoder, saving ~2GB GPU memory.
+
 ## 🏋️ Start training
 
 Once your dataset is ready, start fine-tuning using the following steps.
@@ -181,6 +212,49 @@ Using the above hyperparameters:
 
 
 If you encounter **out-of-memory errors**, try reducing the `batch_size`. If the issue persists, you can lower the `duration_sec` parameter, but be aware that this may negatively impact the user experience during inference, potentially causing the model to become silent more quickly.
+
+## 🎭 PersonaPlex Training
+
+[PersonaPlex](https://huggingface.co/nvidia/personaplex-7b-v1) is a persona-conditioned variant of Moshi with doubled depth codebooks (`dep_q=16` instead of 8). This repository includes a dedicated training script for PersonaPlex models.
+
+#### Key differences from standard Moshi:
+- **Depth codebooks**: 16 instead of 8, enabling richer audio generation
+- **Voice prompt conditioning**: Supports pre-computed voice embeddings
+- **Text prompt conditioning**: System prompts wrapped with `<system>` tags
+- **Pre-computed codes**: Supports the same pre-computed Mimi codes as standard training (see above)
+
+#### Run PersonaPlex training:
+
+```sh
+torchrun --nproc-per-node 1 train_personaplex.py example/personaplex_config.yaml
+```
+
+#### Loading from Moshiko weights:
+
+When starting from Moshiko (the base model), weights are automatically expanded from `dep_q=8` to `dep_q=16`:
+- Depformer self-attention weights are concatenated (doubled)
+- Codebook weights 0-7 are copied to indices 8-15
+
+This is controlled by the `expand_from_moshiko` config option (auto-detected based on the HuggingFace repo name if not specified).
+
+#### Example PersonaPlex config:
+
+```yaml
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+
+# PersonaPlex-specific
+expand_from_moshiko: true  # Auto-detected if not set
+
+lora:
+  enable: true
+  rank: 128
+  scaling: 2.0
+
+duration_sec: 100
+batch_size: 16
+max_steps: 2000
+```
 
 ## ⚙️ Customizing training configuration
 
